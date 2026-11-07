@@ -45,11 +45,19 @@ class QoSTopo(Topo):
                 host,
                 s1,
                 cls=TCLink,
-                bw=5,
+                bw=50,
                 delay="5ms",
                 max_queue_size=200,
             )
-        self.addLink(hsrv, s1, cls=TCLink, bw=50, delay="1ms")
+
+        self.addLink(
+            hsrv, 
+            s1, 
+            cls=TCLink, 
+            bw=5, 
+            delay="1ms",
+        )
+        
 
 
 def switch_ofport_to_host(net, switch_name, host_name):
@@ -110,14 +118,7 @@ def run():
 
     ofport = switch_ofport_to_host(net, "s1", "hsrv")
     info(f"*** hsrv connected to s1 OpenFlow port {ofport}\n")
-    http_post(
-        "/topology",
-        {
-            "server_ofport": ofport,
-            "switch_name": "s1",
-            "port_max_bps": 10_000_000,
-        },
-    )
+    http_post("/topology", {"server_ofport": ofport})
     http_post("/policy", {"weights": {"voice": 1, "video": 1, "bulk": 1}})
 
     py = sys.executable
@@ -140,9 +141,7 @@ def run():
         f"  # On Ubuntu host: {py} {QOS_SCRIPT} sdn-controller "
         "--weights voice=8,video=3,bulk=1\n"
         "  hsrv tail -f /tmp/qos_srv.log\n"
-        "  sh ovs-ofctl -O OpenFlow13 dump-flows s1\n"
-        "  sh ovs-vsctl list queue\n"
-        "  curl -s http://127.0.0.1:8080/status\n\n"
+        "  sh ovs-ofctl -O OpenFlow13 dump-flows s1\n\n"
     )
 
     CLI(net)
