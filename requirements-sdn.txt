@@ -1,0 +1,4 @@
+# SDN controller — use ONE of these in a venv (see INSTALL.md).
+# Ryu on Ubuntu 22.04 / setuptools pins; OS-Ken on newer Ubuntu.
+ryu>=4.34
+# os-ken==4.2.2
