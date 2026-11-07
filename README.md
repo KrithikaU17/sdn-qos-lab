@@ -1,120 +1,192 @@
-# QoS UDP — Mininet + Ryu / OS-Ken (SDN)
+# QoS UDP — Mininet + Ryu (SDN)
 
-Run on **Ubuntu** (22.04 recommended) or in a **privileged** `ubuntu:22.04` Docker container. Install: **[INSTALL.md](INSTALL.md)**. Experiments: **[experiments/PERFORMANCE.md](experiments/PERFORMANCE.md)**.
+Run this stack on **Ubuntu** (VM or lab machine). Install steps: **[INSTALL.md](INSTALL.md)**.
 
-## What this stack does
-
-| Layer | Mechanism |
-|-------|-----------|
-| **Sockets** | `qos_udp.py` — UDP clients on **h1–h3**, server on **hsrv** |
-| **Congestion** | Mininet **TCLink** 5 Mbps on client links |
-| **SDN control** | Ryu or **OS-Ken** — OpenFlow 1.3, REST `/policy` |
-| **Data-plane QoS** | **OVS linux-htb** queues 0/1/2 + `set_queue` per class (`ovs_qos.py`) |
-| **Metrics** | Server log: throughput, latency, loss, Jain fairness |
-
-## Topology
+## Topology and hosts
 
 ```
-  h1  10.0.0.1   (voice)  ──┐
-  h2  10.0.0.2   (video)  ──┼── s1 (OVS) ──► hsrv 10.0.0.10
-  h3  10.0.0.3   (bulk)   ──┘      ▲
-                                     │ HTB queues + OpenFlow
-                               Ryu / OS-Ken :6633 / REST :8080
+  h1  10.0.0.1   (voice client)
+  h2  10.0.0.2   (video client)
+  h3  10.0.0.3   (bulk client)
+        |  |  |
+        +--+--+- s1 (Open vSwitch, OpenFlow 1.3)
+                 |
+  hsrv  10.0.0.10  (UDP server — qos_udp server)
 ```
 
-| Class | UDP port (`--class-ports`) | OVS queue |
-|-------|----------------------------|-----------|
-| voice | 19001 | 0 |
-| video | 19002 | 1 |
-| bulk  | 19003 | 2 |
+| Host | IP | Role |
+|------|-----|------|
+| `h1` | 10.0.0.1 | `qos_udp.py client` — voice |
+| `h2` | 10.0.0.2 | `qos_udp.py client` — video |
+| `h3` | 10.0.0.3 | `qos_udp.py client` — bulk |
+| `hsrv` | 10.0.0.10 | `qos_udp.py server` (metrics log) |
+| `s1` | — | Switch programmed by **Ryu** |
+
+| Class | UDP dest port (use `--class-ports`) |
+|-------|-------------------------------------|
+| voice | 19001 |
+| video | 19002 |
+| bulk  | 19003 |
+
+Client links to `s1`: **5 Mbps** each (congestion). **Ryu** REST: `http://127.0.0.1:8080` · OpenFlow: **6633**.
+
+Set project path once (adjust if needed):
+
+```bash
+export PROJ=~/prj5
+cd $PROJ
+```
 
 ---
 
-## 1. Start order
+## 1. Start order (three terminals on Ubuntu)
 
-**Terminal 1 — SDN controller** (venv on 22.04; OS-Ken on 24.04+ — see INSTALL)
+**Terminal 1 — SDN controller (leave running)**
 
 ```bash
-cd "$PROJ"
-# Ryu:
+cd $PROJ
 ryu-manager ryu_qos_controller.py
-# OS-Ken:
-# ryu-manager osken_qos_controller.py
 ```
 
-**Terminal 2 — Mininet**
+**Terminal 2 — Mininet (creates h1, h2, h3, hsrv, s1)**
 
 ```bash
+cd $PROJ
 sudo python3 mininet_qos.py
 ```
 
-Registers `server_ofport`, applies initial HTB QoS, starts server on **hsrv** (`/tmp/qos_srv.log`).
+`mininet_qos.py` waits for Ryu, registers the switch port to `hsrv`, and **starts the UDP server on `hsrv`** in the background (`/tmp/qos_srv.log`).
 
-**Terminal 3 — policy** (while traffic runs)
+**Terminal 3 — SDN policy (Ubuntu host, not inside Mininet CLI)**
+
+Run while clients are sending traffic:
 
 ```bash
+cd $PROJ
 python3 qos_udp.py sdn-controller --weights voice=8,video=3,bulk=1
 ```
 
-Each policy change **reprograms HTB rates** and OpenFlow rules (queue + priority).
-
 ---
 
-## 2. Mininet CLI — clients and logs
+## 2. Using Mininet hosts: h1, h2, h3, hsrv
+
+At the **`mininet>`** prompt you run commands **on a host** with:
 
 ```text
-mininet> h1 python3 /app/qos_udp.py client --host 10.0.0.10 --class-ports --class voice --rate 400 --duration 60 &
-mininet> h2 python3 /app/qos_udp.py client --host 10.0.0.10 --class-ports --class video --rate 600 --duration 60 &
-mininet> h3 python3 /app/qos_udp.py client --host 10.0.0.10 --class-ports --class bulk  --rate 800 --duration 60 &
+mininet> <host> <command>
+```
+
+### hsrv (server)
+
+Started automatically by `mininet_qos.py`. You do **not** need to start the server again unless you stopped it.
+
+**View metrics (throughput, latency, loss, fairness):**
+
+```text
 mininet> hsrv tail -f /tmp/qos_srv.log
 ```
 
-Use your real path instead of `/app` if needed.
+**Check server is running:**
+
+```text
+mininet> hsrv pgrep -af qos_udp
+mininet> hsrv ss -ulnp | grep -E '19001|19002|19003'
+```
+
+**Restart server manually (if needed):**
+
+```text
+mininet> hsrv pkill -f "qos_udp.py server" || true
+mininet> hsrv python3 $PROJ/qos_udp.py server --host 0.0.0.0 --class-ports --mininet > /tmp/qos_srv.log 2>&1 &
+```
+
+Use the real path to `qos_udp.py` on the VM if `$PROJ` is not set inside Mininet hosts (often the same path as on the host, e.g. `/home/user/prj5/qos_udp.py`).
+
+### h1, h2, h3 (clients)
+
+**Option A — one line per host from `mininet>`** (background):
+
+```text
+mininet> h1 python3 /home/user/prj5/qos_udp.py client --host 10.0.0.10 --class-ports --class voice --rate 400 --duration 30 &
+mininet> h2 python3 /home/user/prj5/qos_udp.py client --host 10.0.0.10 --class-ports --class video --rate 600 --duration 30 &
+mininet> h3 python3 /home/user/prj5/qos_udp.py client --host 10.0.0.10 --class-ports --class bulk  --rate 800 --duration 30 &
+```
+
+Replace `/home/user/prj5` with your clone path.
+
+**Option B — shell on a host (`xterm`)**
+
+```text
+mininet> xterm h1
+mininet> xterm h2
+mininet> xterm h3
+```
+
+In each xterm:
+
+```bash
+cd ~/prj5
+python3 qos_udp.py client --host 10.0.0.10 --class-ports --class voice --rate 400 --duration 30
+# h2: --class video   h3: --class bulk
+```
+
+**Connectivity check from a client host:**
+
+```text
+mininet> h1 ping -c 3 10.0.0.10
+```
+
+### Suggested manual workflow
+
+1. Terminal 1: `ryu-manager …`
+2. Terminal 2: `sudo python3 mininet_qos.py` → wait for `mininet>`
+3. `mininet>`: start **h1, h2, h3** clients (above)
+4. `mininet>`: `hsrv tail -f /tmp/qos_srv.log`
+5. Terminal 3: `sdn-controller` mid-test to favor voice
+6. `exit` at `mininet>` to tear down
 
 ---
 
-## 3. Verify QoS and SDN
+## 3. Verify SDN and traffic
+
+**On Ubuntu host (Terminal 3 or another shell):**
 
 ```bash
-curl -s http://127.0.0.1:8080/status | python3 -m json.tool
+curl http://127.0.0.1:8080/status
+python3 qos_udp.py sdn-controller --weights voice=1,video=1,bulk=1
+python3 qos_udp.py sdn-controller --weights voice=8,video=3,bulk=1
 ```
+
+**OpenFlow rules on `s1` (from `mininet>` or host with sudo):**
 
 ```text
 mininet> sh ovs-ofctl -O OpenFlow13 dump-flows s1
-mininet> sh ovs-vsctl list queue
 ```
 
-`status` should include `ovs_port`, `queue_map`, and current `weights`.
+**Switch port counters:**
+
+```text
+mininet> sh ovs-ofctl -O OpenFlow13 dump-ports s1
+```
 
 ---
 
-## 4. Performance comparison (report / PPT)
+## 4. Mininet-related files
 
-Follow **[experiments/PERFORMANCE.md](experiments/PERFORMANCE.md)**:
-
-1. Baseline weights `1,1,1` → save log → `parse_qos_log.py` → CSV  
-2. Dynamic `8,3,1` → save log → compare voice vs bulk  
-3. Optional slide text: **[PPT_additions.md](PPT_additions.md)**
-
----
-
-## 5. Project files
-
-| File | Role |
-|------|------|
-| `qos_udp.py` | UDP app: client, server, `sdn-controller` |
-| `mininet_qos.py` | Topology, TCLink, register topology with controller |
-| `ryu_qos_controller.py` | Ryu: HTB + OpenFlow |
-| `osken_qos_controller.py` | OS-Ken: same logic |
-| `ovs_qos.py` | `ovs-vsctl` HTB setup, queue ↔ class map |
-| `experiments/parse_qos_log.py` | Log → CSV for graphs |
-| `qos_udp_guide.txt` | Tutorial + rubric notes |
+| File | Purpose |
+|------|---------|
+| `mininet_qos.py` | Topology, link limits, start server on `hsrv`, Mininet CLI |
+| `ryu_qos_controller.py` | Ryu SDN app (flow priorities + REST `/policy`, `/topology`) |
+| `qos_udp.py` | `client` on **h1–h3**, `server` on **hsrv**, `sdn-controller` on Ubuntu host |
+| `requirements-sdn.txt` | `pip install ryu` |
+| `INSTALL.md` | apt: Mininet, OVS |
 
 ---
 
-## 6. Report checklist
+## 5. Report checklist
 
-1. `dump-flows` + **`list queue`** before/after policy  
-2. Server log + Jain fairness  
-3. Baseline vs **8:3:1** table or graph (CSV)  
-4. Architecture: sockets + **Mininet congestion** + **OVS queues** + dynamic policy
+1. Screenshot: `dump-flows s1` before and after `sdn-controller`.
+2. Log excerpt: `hsrv tail -40 /tmp/qos_srv.log` (per-class throughput, latency, loss, Jain fairness).
+3. Note policy change time vs change in voice vs bulk rows in the log.
+
+More background: **qos_udp_guide.txt**.

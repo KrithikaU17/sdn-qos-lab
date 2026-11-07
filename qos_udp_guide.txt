@@ -227,9 +227,9 @@ Requirement-by-requirement
     Note: Apps self-label traffic; not 5-tuple/DPI or many flows per class.
 
   Implement SDN-based priority policies
-    Status: MET (Mininet lab)
-    Evidence: Ryu/OS-Ken OpenFlow priorities + OVS HTB queues (ovs_qos.py).
-    Note: Policy via sdn-controller REST; server --mininet measures only.
+    Status: PARTIAL (SDN-style)
+    Evidence: Controller sends JSON weights/capacity; server updates scheduler.
+    Note: Not OpenFlow/Mininet; separated control + data plane in one app.
 
   Create controlled congestion
     Status: MET
@@ -258,15 +258,11 @@ Suggested wording for reports
   queue weights and bottleneck rate to a congested node — not flow rules on
   physical switches.
 
-OVS data-plane QoS (implemented)
---------------------------------
-  ovs_qos.py — linux-htb on hsrv egress; queues 0/1/2 = voice/video/bulk.
-  OpenFlow OFPActionSetQueue + policy-driven max-rates via ovs-vsctl.
-
-Gaps (honest scope)
--------------------
-  - Classification: UDP dest port + app header, not DPI.
-  - Single-switch lab topology; not carrier-scale multi-hop QoS.
+Gaps (only if rubric requires strict SDN / flow detection)
+----------------------------------------------------------
+  - No OpenFlow, switch flow tables, or Mininet topology.
+  - Classification is explicit in the packet, not inferred from IP/ports.
+  - Congestion is modeled in the server process, not on an external link.
 
 Proof command
 -------------
@@ -452,11 +448,7 @@ FILES IN THIS PROJECT
 ================================================================================
 
   qos_udp.py            — UDP app (standalone + --class-ports for Mininet).
-  ryu_qos_controller.py — Ryu SDN (OpenFlow + OVS HTB + REST).
-  osken_qos_controller.py — OS-Ken variant (same behavior).
-  ovs_qos.py            — HTB queue setup and class→queue mapping.
-  experiments/          — PERFORMANCE.md, parse_qos_log.py for CSV/graphs.
-  PPT_additions.md      — Suggested new presentation slides.
+  ryu_qos_controller.py — Ryu SDN controller (OpenFlow + REST /policy).
   mininet_qos.py        — Mininet topology and launcher (run with sudo).
   requirements-sdn.txt  — pip: ryu (see INSTALL.md for apt packages).
   INSTALL.md            — Ubuntu VM / WSL install steps.
