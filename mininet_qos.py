@@ -25,13 +25,17 @@ from mininet.net import Mininet
 from mininet.node import OVSKernelSwitch, RemoteController
 from mininet.topo import Topo
 
+# Ryu REST base URL (override with QOS_RYU_URL if Ryu is not on localhost).
 RYU_REST = os.environ.get("QOS_RYU_URL", "http://127.0.0.1:8080")
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 QOS_SCRIPT = os.path.join(PROJECT_DIR, "qos_udp.py")
 
 
 class QoSTopo(Topo):
+    """One switch, three client hosts, and a server on a slower bottleneck link."""
+
     def build(self):
+        """Create s1, h1–h3 (50 Mbps), and hsrv (5 Mbps) so the server link congests."""
         s1 = self.addSwitch("s1", protocols="OpenFlow13")
         hsrv = self.addHost("hsrv", ip="10.0.0.10/24", mac="00:00:00:00:00:10")
         clients = (
@@ -51,16 +55,16 @@ class QoSTopo(Topo):
             )
 
         self.addLink(
-            hsrv, 
-            s1, 
-            cls=TCLink, 
-            bw=5, 
+            hsrv,
+            s1,
+            cls=TCLink,
+            bw=5,
             delay="1ms",
         )
-        
 
 
 def switch_ofport_to_host(net, switch_name, host_name):
+    """Return the number of the switch port that connects to this host."""
     switch = net[switch_name]
     host = net[host_name]
     pairs = host.connectionsTo(switch)
@@ -71,6 +75,7 @@ def switch_ofport_to_host(net, switch_name, host_name):
 
 
 def http_post(path, payload):
+    """POST JSON to the Ryu REST API (for example /topology or /policy)."""
     url = f"{RYU_REST.rstrip('/')}{path}"
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
@@ -84,6 +89,7 @@ def http_post(path, payload):
 
 
 def wait_for_ryu():
+    """Poll GET /status until Ryu is up, or give up after about 20 seconds."""
     status_url = f"{RYU_REST.rstrip('/')}/status"
     for _ in range(40):
         try:
@@ -95,6 +101,7 @@ def wait_for_ryu():
 
 
 def run():
+    """Start Mininet, tell Ryu the server port, launch the UDP server, then CLI."""
     setLogLevel("info")
     if not os.path.isfile(QOS_SCRIPT):
         info(f"*** Missing {QOS_SCRIPT}\n")

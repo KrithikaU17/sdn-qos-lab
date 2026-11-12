@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""UDP QoS traffic generator, congested receiver, and SDN-style controller."""
+"""
+UDP QoS lab tool: congested receiver, traffic sender, and policy updater.
+
+Modes (see --help):
+  server          Receive UDP, queue by class, serve a limited bottleneck.
+  client          Send marked UDP packets for one traffic class.
+  controller      Change queue weights on the local UDP control port.
+  sdn-controller  Push the same weights to the Ryu REST API (OpenFlow).
+"""
 
 import argparse
 import json
@@ -12,19 +20,28 @@ import urllib.error
 import urllib.request
 from collections import defaultdict
 
+# Traffic classes and the IDs written into each UDP packet header.
 CLASSES = {"voice": 1, "video": 2, "bulk": 3}
 NAMES = {value: key for key, value in CLASSES.items()}
-# Per-class UDP ports for Mininet + OpenFlow matching (see ryu_qos_controller.py)
+
+# Each class uses its own UDP port, so the switch can tell voice, video and bulk apart.
 CLASS_PORTS = {"voice": 19001, "video": 19002, "bulk": 19003}
+
+# Binary header: magic, class id, sequence number, send timestamp.
 HEADER = struct.Struct("!4sBId")
 MAGIC = b"QOS1"
+
 DEFAULT_RYU_POLICY_URL = "http://127.0.0.1:8080/policy"
+# With --mininet, the server does not slow packets down itself. The slow Mininet link is the bottleneck.
 MININET_SERVER_CAPACITY = 100_000
 
 
 class QoSServer:
+    """UDP receiver that queues packets by class and serves them with weights."""
+
     def __init__(self, host, port, control_port, capacity, queue_size, weights,
                  class_ports=False):
+        """Store listen addresses, bottleneck rate, and starting class weights."""
         self.host, self.port, self.control_port = host, port, control_port
         self.class_ports = class_ports
         self.capacity = capacity
@@ -32,6 +49,7 @@ class QoSServer:
         self.queues = {
             name: queue.Queue(maxsize=queue_size) for name in CLASSES
         }
+        # Counters for reports: totals plus the last 1-second interval.
         self.stats = defaultdict(
             lambda: {
                 "offered": 0, "processed": 0, "dropped": 0, "bytes": 0,
@@ -42,15 +60,18 @@ class QoSServer:
         )
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
+        # Running score per class. The class with the highest score gets the next turn.
         self.current = {name: 0 for name in CLASSES}
 
     def _enqueue_packet(self, data, name_hint=None):
+        """Parse one packet and put it on its class queue, or drop if full."""
         if len(data) < HEADER.size:
             return
         magic, class_id, seq, sent_at = HEADER.unpack_from(data)
         name = NAMES.get(class_id)
         if magic != MAGIC or not name:
             return
+        # Reject packets that arrived on the wrong class-specific port.
         if name_hint and name_hint != name:
             return
         with self.lock:
@@ -66,6 +87,7 @@ class QoSServer:
                 stat["interval_dropped"] += 1
 
     def receive_on_port(self, port, name_hint=None):
+        """Listen for UDP on one port and enqueue every valid packet."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind((self.host, port))
         sock.settimeout(0.2)
@@ -78,6 +100,7 @@ class QoSServer:
         sock.close()
 
     def receive(self):
+        """Start listeners: one shared port, or one port per traffic class."""
         if self.class_ports:
             threads = [
                 threading.Thread(
@@ -95,6 +118,7 @@ class QoSServer:
             self.receive_on_port(self.port)
 
     def choose_queue(self):
+        """Pick which class sends the next packet. Bigger weights get more turns."""
         available = [name for name, q in self.queues.items() if not q.empty()]
         if not available:
             return None
@@ -108,6 +132,7 @@ class QoSServer:
         return selected
 
     def schedule(self):
+        """Dequeue packets at the bottleneck rate (capacity packets per second)."""
         next_service = time.perf_counter()
         while not self.stop_event.is_set():
             now = time.perf_counter()
@@ -133,6 +158,7 @@ class QoSServer:
             next_service = max(next_service + 1.0 / max(capacity, 1), time.perf_counter())
 
     def control(self):
+        """UDP control API: JSON {weights, capacity_pps} updates live policy."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind((self.host, self.control_port))
         sock.settimeout(0.2)
@@ -159,11 +185,13 @@ class QoSServer:
 
     @staticmethod
     def fairness(values):
+        """Fairness score from 0 to 1 (Jain index). 1.0 means all classes got equal throughput."""
         total = sum(values)
         squares = sum(value * value for value in values)
         return total * total / (len(values) * squares) if squares else 1.0
 
     def report(self):
+        """Print throughput, latency, and loss for each class every second."""
         print("time class  throughput_kbps latency_ms loss_% processed queued")
         started = time.time()
         while not self.stop_event.wait(1):
@@ -191,6 +219,7 @@ class QoSServer:
             print(f"Jain fairness index: {self.fairness(throughputs):.3f}", flush=True)
 
     def run(self, duration=0):
+        """Start receive, schedule, control, and report threads until stop."""
         threads = [
             threading.Thread(target=self.receive, daemon=True),
             threading.Thread(target=self.schedule, daemon=True),
@@ -216,6 +245,7 @@ class QoSServer:
 
 
 def send_traffic(host, port, traffic_class, rate, duration, payload_size):
+    """Client API: send marked UDP packets at a steady packets-per-second rate."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     target = (host, port)
     interval = 1.0 / rate
@@ -236,6 +266,7 @@ def send_traffic(host, port, traffic_class, rate, duration, payload_size):
 
 
 def update_policy(host, port, weights, capacity=None):
+    """Local controller API: send new weights (and optional rate) over UDP."""
     command = {"weights": weights}
     if capacity is not None:
         command["capacity_pps"] = capacity
@@ -248,6 +279,7 @@ def update_policy(host, port, weights, capacity=None):
 
 
 def update_sdn_policy(weights, ryu_url=DEFAULT_RYU_POLICY_URL):
+    """SDN controller API: send the weights to Ryu over HTTP so it updates the switch rules."""
     payload = json.dumps({"weights": weights}).encode()
     req = urllib.request.Request(
         ryu_url,
@@ -264,12 +296,14 @@ def update_sdn_policy(weights, ryu_url=DEFAULT_RYU_POLICY_URL):
 
 
 def resolve_client_port(traffic_class, port, use_class_ports):
+    """Return the UDP port for this class, or the shared --port if not using class ports."""
     if use_class_ports:
         return CLASS_PORTS[traffic_class]
     return port
 
 
 def parse_weights(text):
+    """Parse CLI text like voice=8,video=3,bulk=1 into a dict."""
     result = {}
     for item in text.split(","):
         name, value = item.split("=", 1)
@@ -280,6 +314,7 @@ def parse_weights(text):
 
 
 def build_parser():
+    """Build command-line flags for server, client, and both controller modes."""
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="mode", required=True)
     common = argparse.ArgumentParser(add_help=False)
@@ -334,6 +369,7 @@ def build_parser():
 
 
 def main():
+    """Read CLI args and run the matching mode."""
     args = build_parser().parse_args()
     if args.mode == "server":
         capacity = args.capacity
