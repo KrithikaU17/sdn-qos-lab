@@ -1,2 +1,0 @@
-# Python SDN controller (install in Ubuntu VM; Mininet via apt — see INSTALL.md)
-ryu>=4.34
